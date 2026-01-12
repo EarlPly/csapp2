@@ -1,0 +1,61 @@
+openapi: 3.0.0
+info:
+  title: Segmentation Dashboard API
+  description: API for accessing customer segments and cluster data.
+  version: 1.0.0
+servers:
+  - url: http://localhost/csapp
+    description: Local Development Server
+paths:
+  /api.php:
+    get:
+      summary: Get segmentation statistics
+      description: Returns aggregated data for a specific segmentation type (e.g., CLV Tiers, Gender).
+      parameters:
+        - in: query
+          name: endpoint
+          schema:
+            type: string
+            enum: [segments]
+          required: true
+          example: segments
+        - in: query
+          name: type
+          schema:
+            type: string
+            enum: [gender, region, clv_tier, cluster]
+          required: true
+          description: The type of segmentation to analyze
+        - in: query
+          name: api_key
+          schema:
+            type: string
+          required: true
+          description: Your secure API Key
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "success"
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        label:
+                          type: string
+                          example: "Platinum"
+                        count:
+                          type: integer
+                          example: 150
+                        avg_metric:
+                          type: number
+                          example: 350000.50
+        '401':
+          description: Unauthorized - Invalid API Key

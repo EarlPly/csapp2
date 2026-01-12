@@ -1,0 +1,13 @@
+RewriteEngine On
+
+# Redirect /api/segments/gender -> api.php?endpoint=segments&type=gender
+RewriteRule ^api/segments/([^/]+)/?$ api.php?endpoint=segments&type=$1 [L,QSA]
+
+# Redirect /api/clusters -> api.php?endpoint=clusters
+RewriteRule ^api/clusters/?$ api.php?endpoint=clusters [L,QSA]
+
+# Redirect /api/customers/123 -> api.php?endpoint=customers&id=123
+RewriteRule ^api/customers/([^/]+)/?$ api.php?endpoint=customers&id=$1 [L,QSA]
+
+# Redirect /api/insights/gender -> api.php?endpoint=insights&type=gender
+RewriteRule ^api/insights/([^/]+)/?$ api.php?endpoint=insights&type=$1 [L,QSA]
