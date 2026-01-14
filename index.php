@@ -43,119 +43,87 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $cluster_metadata = [];
     $cluster_details = [];
 
-    // --- CACHING LAYER START ---
-    // 1. Setup Cache Location (Creates a 'cache' folder if missing)
+// --- CACHING LAYER START ---
+    // 1. Setup Cache Location
     $cacheDir = __DIR__ . '/cache';
     if (!is_dir($cacheDir)) {
         mkdir($cacheDir, 0777, true);
     }
 
-    // 2. Define Cache Key and Lifetime (1 Hour)
+    // 2. Define Cache Key
     $cacheFile = $cacheDir . '/segment_' . $segmentationType . '.json';
     $cacheLifetime = 3600; 
-    $isCached = false;
 
-    // 3. CHECK CACHE: If file exists and is less than 1 hour old
-    if (file_exists($cacheFile) && (time() - filemtime($cacheFile) < $cacheLifetime)) {
-        // LOAD FROM FILE (Fast!)
-        $results = json_decode(file_get_contents($cacheFile), true);
-        $isCached = true;
-        
-        // Set a dummy SQL for export just so it doesn't break
-        $_SESSION['export_sql'] = "SELECT 'Data loaded from cache for $segmentationType'";
-        $_SESSION['is_cached'] = true; // Optional: To show a badge in UI
-
-        if ($segmentationType === 'cluster') {
-            try {
-                $metadata_sql = "SELECT * FROM cluster_metadata ORDER BY cluster_id";
-                $metadata_stmt = $pdo->query($metadata_sql);
-                $cluster_metadata = $metadata_stmt->fetchAll(PDO::FETCH_ASSOC);
-
-                $detail_sql = "SELECT c.customer_id, c.age, c.income, c.purchase_amount, sr.cluster_label
-                               FROM customers c
-                               JOIN segmentation_results sr ON c.customer_id = sr.customer_id
-                               ORDER BY sr.cluster_label";
-                $detail_stmt = $pdo->query($detail_sql);
-                $cluster_details = $detail_stmt->fetchAll(PDO::FETCH_ASSOC);
-            } catch (PDOException $e) {
-                $cluster_metadata = [];
-                $cluster_details = [];
-            }
-        }
-    } 
-    else {
-        
+    // 3. GENERATE SQL FIRST (MOVED UP)
+    // We generate the SQL immediately so it is ALWAYS available for the export session,
+    // even if we end up loading the visual results from the JSON cache.
     switch ($segmentationType) {
         case 'gender':
             $sql = "SELECT sr.cluster_label, COUNT(*) AS total_customers, ROUND(AVG(c.income), 2) AS avg_income, ROUND(AVG(c.purchase_amount), 2) AS avg_purchase_amount, MIN(c.age) AS min_age, MAX(c.age) AS max_age, CASE WHEN SUM(CASE WHEN c.gender = 'Male' THEN 1 ELSE 0 END) >= SUM(CASE WHEN c.gender = 'Female' THEN 1 ELSE 0 END) THEN 'Male' ELSE 'Female' END AS dominant_gender FROM segmentation_results sr JOIN customers c ON sr.customer_id = c.customer_id GROUP BY sr.cluster_label ORDER BY sr.cluster_label;";
             break;
-
         case 'region':
             $sql = "SELECT region, COUNT(*) AS total_customers, ROUND(AVG(income), 2) AS avg_income, ROUND(AVG(purchase_amount), 2) AS avg_purchase_amount FROM customers GROUP BY region ORDER BY total_customers DESC";
             break;
-
         case 'age_group':
             $sql = "SELECT CASE WHEN age BETWEEN 0 AND 17 THEN '0-17' WHEN age BETWEEN 18 AND 25 THEN '18-25' WHEN age BETWEEN 26 AND 35 THEN '26-35' WHEN age BETWEEN 36 AND 50 THEN '36-50' WHEN age BETWEEN 51 AND 65 THEN '51-65' ELSE '66+' END AS age_group, COUNT(*) AS total_customers, ROUND(AVG(income), 2) AS avg_income, ROUND(AVG(purchase_amount), 2) AS avg_purchase_amount, MIN(purchase_amount) AS min_purchase_amount, MAX(purchase_amount) AS max_purchase_amount FROM customers GROUP BY age_group ORDER BY age_group";
             break;
-
         case 'income_bracket':
             $sql = "SELECT CASE WHEN income < 30000 THEN 'Low Income (<30k)' WHEN income BETWEEN 30000 AND 70000 THEN 'Middle Income (30k-70k)' ELSE 'High Income (>70k)' END AS income_bracket, COUNT(*) AS total_customers, ROUND(AVG(purchase_amount), 2) AS avg_purchase_amount FROM customers GROUP BY income_bracket ORDER BY income_bracket";
             break;
-
         case 'cluster':
             $sql = "SELECT sr.cluster_label, COUNT(*) AS total_customers, ROUND(AVG(c.income), 2) AS avg_income, ROUND(AVG(c.purchase_amount), 2) AS avg_purchase_amount, MIN(c.age) AS min_age, MAX(c.age) AS max_age FROM segmentation_results sr JOIN customers c ON sr.customer_id = c.customer_id GROUP BY sr.cluster_label ORDER BY sr.cluster_label";
-            // Fetch cluster metadata for enhanced visualizations
-            try {
-                $metadata_sql = "SELECT * FROM cluster_metadata ORDER BY cluster_id";
-                $metadata_stmt = $pdo->query($metadata_sql);
-                $cluster_metadata = $metadata_stmt->fetchAll(PDO::FETCH_ASSOC);
-
-                // Fetch detailed customer data for scatter plots
-                $detail_sql = "SELECT c.customer_id, c.age, c.income, c.purchase_amount, sr.cluster_label
-                               FROM customers c
-                               JOIN segmentation_results sr ON c.customer_id = sr.customer_id
-                               ORDER BY sr.cluster_label";
-                $detail_stmt = $pdo->query($detail_sql);
-                $cluster_details = $detail_stmt->fetchAll(PDO::FETCH_ASSOC);
-            } catch (PDOException $e) {
-                // If cluster_metadata table doesn't exist yet, set to empty arrays
-                $cluster_metadata = [];
-                $cluster_details = [];
-            }
             break;
-
         case 'purchase_tier':
             $sql = "SELECT CASE WHEN purchase_amount < 1000 THEN 'Low Spender (<1k)' WHEN purchase_amount BETWEEN 1000 AND 3000 THEN 'Medium Spender (1k-3k)' ELSE 'High Spender (>3k)' END AS purchase_tier, COUNT(*) AS total_customers, ROUND(AVG(income), 2) AS avg_income FROM customers GROUP BY purchase_tier ORDER BY purchase_tier";
             break;
         case 'clv_tier':
-            // Logic: CLV = Purchase Amount * Frequency * Lifespan
-            // Tiers: Bronze (<50k), Silver (50k-150k), Gold (150k-300k), Platinum (>300k)
-            $sql = "SELECT 
-                        CASE 
-                            WHEN (purchase_amount * purchase_frequency * customer_lifespan) < 50000 THEN 'Bronze (<50k)'
-                            WHEN (purchase_amount * purchase_frequency * customer_lifespan) BETWEEN 50000 AND 150000 THEN 'Silver (50k-150k)'
-                            WHEN (purchase_amount * purchase_frequency * customer_lifespan) BETWEEN 150001 AND 300000 THEN 'Gold (150k-300k)'
-                            ELSE 'Platinum (>300k)'
-                        END AS clv_tier, 
-                        COUNT(*) AS total_customers, 
-                        ROUND(AVG(income), 2) AS avg_income, 
-                        ROUND(AVG(purchase_amount * purchase_frequency * customer_lifespan), 2) AS avg_clv 
-                    FROM customers 
-                    GROUP BY clv_tier 
-                    ORDER BY avg_clv ASC";
+            $sql = "SELECT CASE WHEN (purchase_amount * purchase_frequency * customer_lifespan) < 50000 THEN 'Bronze (<50k)' WHEN (purchase_amount * purchase_frequency * customer_lifespan) BETWEEN 50000 AND 150000 THEN 'Silver (50k-150k)' WHEN (purchase_amount * purchase_frequency * customer_lifespan) BETWEEN 150001 AND 300000 THEN 'Gold (150k-300k)' ELSE 'Platinum (>300k)' END AS clv_tier, COUNT(*) AS total_customers, ROUND(AVG(income), 2) AS avg_income, ROUND(AVG(purchase_amount * purchase_frequency * customer_lifespan), 2) AS avg_clv FROM customers GROUP BY clv_tier ORDER BY avg_clv ASC";
             break;
         default:
-            $sql = "SELECT * FROM customers LIMIT 10"; // Default query
+            $sql = "SELECT * FROM customers LIMIT 10"; 
     }
 
-        $_SESSION['export_sql'] = $sql;
-        $_SESSION['is_cached'] = false;
+    // SAVE SQL TO SESSION NOW
+    $_SESSION['export_sql'] = $sql;
+    $_SESSION['is_cached'] = false; // Default to false, set to true if cache hit
 
+    // 4. CHECK CACHE
+    if (file_exists($cacheFile) && (time() - filemtime($cacheFile) < $cacheLifetime)) {
+        // LOAD FROM FILE (Fast!)
+        $results = json_decode(file_get_contents($cacheFile), true);
+        $_SESSION['is_cached'] = true;
+
+        // Load Cluster Metadata even if cached (as this is usually fast/small)
+        if ($segmentationType === 'cluster') {
+            try {
+                $metadata_stmt = $pdo->query("SELECT * FROM cluster_metadata ORDER BY cluster_id");
+                $cluster_metadata = $metadata_stmt->fetchAll(PDO::FETCH_ASSOC);
+
+                $detail_stmt = $pdo->query("SELECT c.customer_id, c.age, c.income, c.purchase_amount, sr.cluster_label FROM customers c JOIN segmentation_results sr ON c.customer_id = sr.customer_id ORDER BY sr.cluster_label");
+                $cluster_details = $detail_stmt->fetchAll(PDO::FETCH_ASSOC);
+            } catch (PDOException $e) { /* Ignore if table missing */ }
+        }
+    } 
+    else {
+        // 5. CACHE MISS: EXECUTE QUERY & SAVE
         try {
             $stmt = $pdo->query($sql);
             $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-            // 4. SAVE TO CACHE (Only if we have results)
+            // Fetch Cluster Metadata if needed
+            if ($segmentationType === 'cluster') {
+                 // ... (Copy the same metadata fetch logic here or make a function) ...
+                 // For brevity: Reuse the logic inside the catch block above or just let it run
+                 try {
+                    $metadata_stmt = $pdo->query("SELECT * FROM cluster_metadata ORDER BY cluster_id");
+                    $cluster_metadata = $metadata_stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+                    $detail_stmt = $pdo->query("SELECT c.customer_id, c.age, c.income, c.purchase_amount, sr.cluster_label FROM customers c JOIN segmentation_results sr ON c.customer_id = sr.customer_id ORDER BY sr.cluster_label");
+                    $cluster_details = $detail_stmt->fetchAll(PDO::FETCH_ASSOC);
+                } catch (PDOException $e) { $cluster_metadata = []; $cluster_details = []; }
+            }
+
+            // Save to Cache
             if (!empty($results)) {
                 file_put_contents($cacheFile, json_encode($results));
             }
@@ -261,7 +229,13 @@ if (empty($_SESSION['csrf_token'])) {
 
                 <input type="hidden" name="chart_image_main" id="chart_image_main">
                 <input type="hidden" name="chart_image_pie" id="chart_image_pie">
+    
                 <input type="hidden" name="analysis_insights" id="analysis_insights_input">
+
+                <input type="hidden" name="cluster_html_content" id="cluster_html_content">
+                <input type="hidden" name="chart_cluster_radar" id="chart_cluster_radar">
+                <input type="hidden" name="chart_cluster_bar" id="chart_cluster_bar">
+                <input type="hidden" name="chart_cluster_scatter" id="chart_cluster_scatter">
             </div>
         <div class="modal-footer">
         <button type="submit" class="btn btn-primary" onclick="prepareExport()">Download</button>
@@ -578,26 +552,37 @@ if (empty($_SESSION['csrf_token'])) {
                 }
                 });
                 function prepareExport() {
-                    // 1. Convert chart canvases to Base64 images
+                    // 1. Standard Charts
                     const mainChart = document.getElementById('mainChart');
                     const pieChart = document.getElementById('pieChart');
 
-                    if (mainChart) {
-                        document.getElementById('chart_image_main').value = mainChart.toDataURL('image/png');
-                    }
-                    if (pieChart) {
-                        document.getElementById('chart_image_pie').value = pieChart.toDataURL('image/png');
-                    }
+                    if (mainChart) document.getElementById('chart_image_main').value = mainChart.toDataURL('image/png');
+                    if (pieChart) document.getElementById('chart_image_pie').value = pieChart.toDataURL('image/png');
 
-                    // 2. NEW: Capture Analysis Insights Text
+                    // 2. Analysis Insights Text
                     const insightsDiv = document.getElementById('insights');
                     if (insightsDiv) {
-                        // .innerText gets the clean text without HTML tags (<ul>, <li>)
-                        // If you want to keep formatting in the PDF, you might need to handle raw strings in export.php
                         document.getElementById('analysis_insights_input').value = insightsDiv.innerText;
                     }
 
-                    // 3. Allow the form to submit to export.php
+                    // 3. Cluster Specific Data (Charts & Tables)
+                    const clusterText = document.getElementById('cluster-text-data');
+                    if (clusterText) {
+                        // Get the HTML for characteristics and stats tables
+                        // We do a simple cleanup to make it PDF-friendly (removing grid classes for simple layout)
+                        let htmlContent = clusterText.innerHTML;
+                        document.getElementById('cluster_html_content').value = htmlContent;
+                    }
+
+                    // Cluster Charts
+                    const radar = document.getElementById('clusterRadarChart');
+                    const bar = document.getElementById('clusterComparisonChart');
+                    const scatter = document.getElementById('clusterScatterChart');
+
+                    if (radar) document.getElementById('chart_cluster_radar').value = radar.toDataURL('image/png');
+                    if (bar) document.getElementById('chart_cluster_bar').value = bar.toDataURL('image/png');
+                    if (scatter) document.getElementById('chart_cluster_scatter').value = scatter.toDataURL('image/png');
+
                     return true;
                 }
             </script>
@@ -606,8 +591,9 @@ if (empty($_SESSION['csrf_token'])) {
             <?php 
                 if ($segmentationType === 'cluster' && !empty($cluster_metadata)): ?>
                 <hr class="my-5">
-
+                    
                 <!-- Section 1: Cluster Characteristics -->
+            <div id="cluster-text-data">
                 <div class="row mb-4">
                     <div class="col-12">
                         <h4 class="mb-3">Cluster Characteristics</h4>
@@ -670,7 +656,7 @@ if (empty($_SESSION['csrf_token'])) {
                         </div>
                     </div>
                 </div>
-
+            </div>                               
                 <!-- Section 3: Cluster Feature Visualizations -->
                 <div class="row mb-4">
                     <div class="col-12">
